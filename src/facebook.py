@@ -35,21 +35,29 @@ usage of this module might look like this:
 
 import cgi
 import hashlib
+import logging
+from math import ceil
 import time
 import urllib
+
+
+LOGGER = logging.getLogger(__name__)
 
 # Find a JSON parser
 try:
     import json
     _parse_json = lambda s: json.loads(s)
+    _create_json = lambda s: json.dumps(s)
 except ImportError:
     try:
         import simplejson
         _parse_json = lambda s: simplejson.loads(s)
+        _create_json = lambda s: simplejson.dumps(s)
     except ImportError:
         # For Google AppEngine
         from django.utils import simplejson
         _parse_json = lambda s: simplejson.loads(s)
+        _create_json = lambda s: simplejson.dumps(s)
 
 
 class GraphAPI(object):
@@ -170,14 +178,70 @@ class GraphAPI(object):
         post_data = None if post_args is None else urllib.urlencode(post_args)
         file = urllib.urlopen("https://graph.facebook.com/" + path + "?" +
                               urllib.urlencode(args), post_data)
+        response = {}
         try:
             response = _parse_json(file.read())
         finally:
             file.close()
+        if response in (True, False):
+            return response
         if response.get("error"):
             raise GraphAPIError(response["error"]["type"],
                                 response["error"]["message"])
         return response
+
+    def batch_get_batch(self, uids, path, args={}, post_args={} ):
+        LOGGER.info("Performing Batched Batch Request for %d ids in path '%s'", len(uids), path )
+        batches = int(ceil(len(uids) / 20.0))
+        response = dict()
+        for i in range(batches):
+            LOGGER.info("Batch No. %d", i)
+            start = i * 20
+            end = start + 20
+            batch_uids = uids[start:end]
+            sub_response = self.batch_get( batch_uids, path=path, args=args, post_args=post_args )
+            response.update(sub_response)
+        return response
+#
+    # batch_request( [event_id,event_id2], { limit: 50 }, {} )
+    def batch_get(self, uids, path, args={}, post_args={}):
+
+        paths = [ path % uid for uid in uids ]
+
+        if self.access_token:
+            post_args["access_token"] = self.access_token
+        batch = []
+        for path in paths:
+            batch.append({'method': 'GET', 'relative_url': path})
+
+        post_args['batch'] = _create_json(batch)
+#        post_args['batch'] = batch
+
+        post_data = urllib.urlencode(post_args)
+        file = urllib.urlopen("https://graph.facebook.com/?" +
+                              urllib.urlencode(args), post_data)
+
+        batched_response = dict()
+        try:
+            batched_response = _parse_json(file.read())
+        finally:
+            file.close()
+        # The ordering of the batch array and the responces should be the same
+        response = dict()
+        try:
+            for i in range( len(paths) ):
+                p = uids[i]
+                r = batched_response[i]
+                body = _parse_json(r['body'])
+                code = r['code']
+                headers  = r['headers']
+                response[p] = dict(body=body, code=code, headers=headers)
+        except Exception, e:
+            LOGGER.error("Exception thrown when matching batched request", exc_info=1)
+            raise GraphAPIError('batched_request_error',
+                batched_response)
+        return response
+
 
 
 class GraphAPIError(Exception):
